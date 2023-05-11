@@ -22,13 +22,12 @@ rec {
   hydraw-static = musl64Pkgs.hydraw.components.exes.hydraw;
   tests = {
     hydra-node = nativePkgs.hydra-node.components.tests.tests;
-    hydra-cluster = pkgs.buildEnv {
-      name = "integration";
-      paths = [
-                nativePkgs.hydra-cluster.components.tests.integration
-                cardano-node.packages.${system}.cardano-node
-                hydra-node
-              ];
-    };
+    hydra-cluster = pkgs.writeScriptBin "hydra-cluster-integration-test"
+''
+PATH=${cardano-node.packages.${system}.cardano-node}/bin
+PATH=$PATH:${hydra-node}/bin
+PATH=$PATH:${nativePkgs.hydra-cluster.components.tests.integration}/bin
+exec integration
+'';
   };
 }
