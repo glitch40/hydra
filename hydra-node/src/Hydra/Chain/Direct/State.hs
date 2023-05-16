@@ -304,7 +304,7 @@ commit ::
   UTxO ->
   Either (PostTxError Tx) Tx
 commit ctx st utxo = do
-  case ownInitial of
+  case ownInitial ctx st of
     Nothing ->
       Left (CannotFindOwnInitial{knownUTxO = getKnownUTxO st})
     Just initial ->
@@ -319,29 +319,9 @@ commit ctx st utxo = do
         _ ->
           Left (MoreThanOneUTxOCommitted @Tx)
  where
-  ChainContext{networkId, ownParty, ownVerificationKey, scriptRegistry} = ctx
+  ChainContext{networkId, ownParty, scriptRegistry} = ctx
 
-  InitialState
-    { initialInitials
-    , initialHeadTokenScript
-    , headId
-    } = st
-
-  ownInitial :: Maybe (TxIn, TxOut CtxUTxO, Hash PaymentKey)
-  ownInitial =
-    foldl' go Nothing initialInitials
-   where
-    go (Just x) _ = Just x
-    go Nothing (i, out, _) = do
-      let vkh = verificationKeyHash ownVerificationKey
-      guard $ hasMatchingPT vkh (txOutValue out)
-      pure (i, out, vkh)
-
-  hasMatchingPT :: Hash PaymentKey -> Value -> Bool
-  hasMatchingPT vkh val =
-    case headTokensFromValue initialHeadTokenScript val of
-      [(AssetName bs, 1)] -> bs == serialiseToRawBytes vkh
-      _ -> False
+  InitialState{headId} = st
 
   rejectByronAddress :: (TxIn, TxOut CtxUTxO) -> Either (PostTxError Tx) ()
   rejectByronAddress = \case
@@ -365,6 +345,26 @@ commit ctx st utxo = do
         CommittedTooMuchADAForMainnet lovelaceAmt maxMainnetLovelace
    where
     lovelaceAmt = selectLovelace (txOutValue output)
+
+hasMatchingPT :: InitialState -> Hash PaymentKey -> Value -> Bool
+hasMatchingPT st vkh val =
+  case headTokensFromValue initialHeadTokenScript val of
+    [(AssetName bs, 1)] -> bs == serialiseToRawBytes vkh
+    _ -> False
+ where
+  InitialState{initialHeadTokenScript} = st
+
+ownInitial :: ChainContext -> InitialState -> Maybe (TxIn, TxOut CtxUTxO, Hash PaymentKey)
+ownInitial ctx st =
+  foldl' go Nothing initialInitials
+ where
+  go (Just x) _ = Just x
+  go Nothing (i, out, _) = do
+    let vkh = verificationKeyHash ownVerificationKey
+    guard $ hasMatchingPT st vkh (txOutValue out)
+    pure (i, out, vkh)
+  InitialState{initialInitials} = st
+  ChainContext{ownVerificationKey} = ctx
 
 -- | Construct a collect transaction based on the 'InitialState'. This will
 -- reimburse all the already committed outputs.
