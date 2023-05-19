@@ -66,6 +66,7 @@ import Hydra.Cluster.Scenarios (
   restartedNodeCanAbort,
   restartedNodeCanObserveCommitTx,
   singlePartyCommitsFromExternal,
+  singlePartyCommitsScriptUtxoFromExternal,
   singlePartyHeadFullLifeCycle,
  )
 import Hydra.Cluster.Util (chainConfigFor, keysFor)

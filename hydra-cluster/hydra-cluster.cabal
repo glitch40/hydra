@@ -123,6 +123,8 @@ library
     , base                  >=4.7 && <5
     , base16
     , bytestring
+    , cardano-api
+    , plutus-ledger-api
     , cardano-crypto-class
     , cardano-ledger-core
     , cardano-ledger-shelley

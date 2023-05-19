@@ -14,6 +14,7 @@ import CardanoClient (
   awaitTransaction,
   buildAddress,
   buildTransaction,
+  queryProtocolParameters,
   queryUTxO,
   queryUTxOFor,
   sign,
@@ -95,6 +96,47 @@ seedFromFaucet RunningNode{networkId, nodeSocket} receivingVerificationKey lovel
   theOutputDatum = case marked of
     Fuel -> TxOutDatumHash markerDatumHash
     Normal -> TxOutDatumNone
+
+publishScript ::
+  RunningNode ->
+  AddressInEra ->
+  SigningKey PaymentKey ->
+  IO TxId
+publishScript RunningNode{networkId, nodeSocket} scriptAddress sk = do
+  pparams <- queryProtocolParameters networkId nodeSocket QueryTip
+  utxo <- queryUTxOFor networkId nodeSocket QueryTip vk
+  let outputs = [mkScriptTxOut pparams]
+      totalDeposit = sum (selectLovelace . txOutValue <$> outputs)
+      someUTxO =
+        maybe mempty UTxO.singleton $
+          UTxO.find (\o -> selectLovelace (txOutValue o) > totalDeposit) utxo
+  buildTransaction
+    networkId
+    nodeSocket
+    changeAddress
+    someUTxO
+    []
+    outputs
+    >>= \case
+      Left e ->
+        throwErrorAsException e
+      Right body -> do
+        let tx = makeSignedTransaction [makeShelleyKeyWitness body (WitnessPaymentKey sk)] body
+        submitTransaction networkId nodeSocket tx
+        void $ awaitTransaction networkId nodeSocket tx
+        return $ getTxId body
+ where
+  vk = getVerificationKey sk
+
+  changeAddress = mkVkAddress networkId vk
+
+  mkScriptTxOut pparams =
+    mkTxOutAutoBalance
+      pparams
+      scriptAddress
+      mempty
+      TxOutDatumNone
+      ReferenceScriptNone
 
 -- | Like 'seedFromFaucet', but without returning the seeded 'UTxO'.
 seedFromFaucet_ ::

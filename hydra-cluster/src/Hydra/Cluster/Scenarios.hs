@@ -5,12 +5,14 @@ module Hydra.Cluster.Scenarios where
 
 import Hydra.Prelude
 
-import CardanoClient (queryTip, submitTransaction)
+import CardanoClient (QueryPoint (QueryTip), buildScriptAddress, queryTip, queryUTxO, submitTransaction)
 import CardanoNode (RunningNode (..))
 import Control.Lens ((^?))
-import Data.Aeson (Value, object, (.=))
+import Data.Aeson (object, (.=))
+import qualified Data.Aeson as Aeson
 import Data.Aeson.Lens (key, _JSON)
 import Data.Aeson.Types (parseMaybe)
+import qualified Data.ByteString.Short as SBS
 import qualified Data.Set as Set
 import Hydra.API.ClientInput (RestClientInput (..))
 import Hydra.API.ServerOutput (RestServerOutput (DraftedCommitTx))
@@ -21,19 +23,19 @@ import Hydra.Cardano.Api (
  )
 import Hydra.Chain (HeadId)
 import Hydra.Chain.Direct.Wallet (signWith)
-import Hydra.Cluster.Faucet (Marked (Fuel, Normal), queryMarkedUTxO, seedFromFaucet, seedFromFaucet_)
+import Hydra.Cluster.Faucet (Marked (Fuel, Normal), publishScript, queryMarkedUTxO, seedFromFaucet, seedFromFaucet_)
 import qualified Hydra.Cluster.Faucet as Faucet
 import Hydra.Cluster.Fixture (Actor (..), actorName, alice, aliceSk, aliceVk, bob, bobSk, bobVk)
 import Hydra.Cluster.Util (chainConfigFor, keysFor)
 import Hydra.ContestationPeriod (ContestationPeriod (UnsafeContestationPeriod))
 import Hydra.Ledger (IsTx (balance))
-import Hydra.Ledger.Cardano
 import Hydra.Logging (Tracer, traceWith)
 import Hydra.Options (ChainConfig, networkId, startChainFrom)
 import Hydra.Party (Party)
 import HydraNode (EndToEndLog (..), input, output, send, waitFor, waitForAllMatch, waitMatch, withHydraNode)
 import Network.HTTP.Req
 import Test.Hspec.Expectations (shouldBe)
+import Test.QuickCheck (generate)
 
 restartedNodeCanObserveCommitTx :: Tracer IO EndToEndLog -> FilePath -> RunningNode -> TxId -> IO ()
 restartedNodeCanObserveCommitTx tracer workDir cardanoNode hydraScriptsTxId = do
@@ -202,9 +204,10 @@ singlePartyCommitsScriptUtxoFromExternal ::
 singlePartyCommitsScriptUtxoFromExternal tracer workDir node@RunningNode{networkId} hydraScriptsTxId =
   (`finally` returnFundsToFaucet tracer node Alice) $ do
     refuelIfNeeded tracer node Alice 25_000_000
+    refuelIfNeeded tracer node External 25_000_000
 
     -- these keys should mimic external wallet keys needed to sign the commit tx
-    (externalVk, externalSk) <- keysFor External
+    (_externalVk, externalSk) <- keysFor External
     -- Start hydra-node on chain tip
     tip <- queryTip networkId nodeSocket
     let contestationPeriod = UnsafeContestationPeriod 100
@@ -218,11 +221,21 @@ singlePartyCommitsScriptUtxoFromExternal tracer workDir node@RunningNode{network
       send n1 $ input "Init" []
       headId <- waitMatch 600 n1 $ headIsInitializingWith (Set.fromList [alice])
 
-      -- submit the tx using our external user key to get a utxo to commit
-      utxoToCommit <- seedFromFaucet node externalVk 2_000_000 Normal (contramap FromFaucet tracer)
+      -- here we should produce a valid script
+      dummyScript <- generate $ SBS.toShort <$> arbitrary
+      let scriptAddress = mkScriptAddress @PlutusScriptV2 networkId (fromPlutusScript dummyScript)
+      _ <- publishScript node scriptAddress externalSk
+
+      let scriptAddressForQuery =
+            buildScriptAddress
+              (PlutusScript $ PlutusScriptSerialised dummyScript)
+              networkId
+
+      -- grab a script utxo to commit
+      scriptUtxo <- queryUTxO networkId nodeSocket QueryTip [scriptAddressForQuery]
 
       -- Request to build a draft commit tx from hydra-node
-      let clientPayload = DraftCommitTx @Tx utxoToCommit
+      let clientPayload = DraftCommitTx @Tx scriptUtxo
 
       response <-
         runReq defaultHttpConfig $
@@ -242,7 +255,7 @@ singlePartyCommitsScriptUtxoFromExternal tracer workDir node@RunningNode{network
       submitTransaction networkId nodeSocket signedCommitTx
 
       waitFor tracer 600 [n1] $
-        output "HeadIsOpen" ["utxo" .= utxoToCommit, "headId" .= headId]
+        output "HeadIsOpen" ["utxo" .= scriptUtxo, "headId" .= headId]
 
       traceRemainingFunds node tracer Alice
  where
@@ -313,7 +326,7 @@ returnFundsToFaucet ::
 returnFundsToFaucet tracer =
   Faucet.returnFundsToFaucet (contramap FromFaucet tracer)
 
-headIsInitializingWith :: Set Party -> Value -> Maybe HeadId
+headIsInitializingWith :: Set Party -> Aeson.Value -> Maybe HeadId
 headIsInitializingWith expectedParties v = do
   guard $ v ^? key "tag" == Just "HeadIsInitializing"
   parties <- v ^? key "parties"
