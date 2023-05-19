@@ -138,6 +138,12 @@ spec = around showLogsOnFailure $ do
             publishHydraScriptsAs node Faucet
               >>= singlePartyCommitsFromExternal tracer tmpDir node
 
+      it "commits script utxo from external wallet" $ \tracer -> do
+        withClusterTempDir "commits-script-utxo-from-external-wallet" $ \tmpDir -> do
+          withCardanoNodeDevnet (contramap FromCardanoNode tracer) tmpDir $ \node ->
+            publishHydraScriptsAs node Faucet
+              >>= singlePartyCommitsScriptUtxoFromExternal tracer tmpDir node
+
     describe "three hydra nodes scenario" $ do
       it "inits a Head, processes a single Cardano transaction and closes it again" $ \tracer ->
         failAfter 60 $

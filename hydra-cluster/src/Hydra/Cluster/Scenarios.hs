@@ -134,14 +134,9 @@ singlePartyHeadFullLifeCycle tracer workDir node@RunningNode{networkId} hydraScr
       send n1 $ input "Fanout" []
       waitFor tracer 600 [n1] $
         output "HeadIsFinalized" ["utxo" .= object mempty, "headId" .= headId]
-    traceRemainingFunds Alice
+    traceRemainingFunds node tracer Alice
  where
   RunningNode{nodeSocket} = node
-
-  traceRemainingFunds actor = do
-    (actorVk, _) <- keysFor actor
-    (fuelUTxO, otherUTxO) <- queryMarkedUTxO node actorVk
-    traceWith tracer RemainingFunds{actor = actorName actor, fuelUTxO, otherUTxO}
 
 singlePartyCommitsFromExternal ::
   Tracer IO EndToEndLog ->
@@ -194,14 +189,70 @@ singlePartyCommitsFromExternal tracer workDir node@RunningNode{networkId} hydraS
       waitFor tracer 600 [n1] $
         output "HeadIsOpen" ["utxo" .= utxoToCommit, "headId" .= headId]
 
-      traceRemainingFunds Alice
+      traceRemainingFunds node tracer Alice
  where
   RunningNode{nodeSocket} = node
 
-  traceRemainingFunds actor = do
-    (actorVk, _) <- keysFor actor
-    (fuelUTxO, otherUTxO) <- queryMarkedUTxO node actorVk
-    traceWith tracer RemainingFunds{actor = actorName actor, fuelUTxO, otherUTxO}
+singlePartyCommitsScriptUtxoFromExternal ::
+  Tracer IO EndToEndLog ->
+  FilePath ->
+  RunningNode ->
+  TxId ->
+  IO ()
+singlePartyCommitsScriptUtxoFromExternal tracer workDir node@RunningNode{networkId} hydraScriptsTxId =
+  (`finally` returnFundsToFaucet tracer node Alice) $ do
+    refuelIfNeeded tracer node Alice 25_000_000
+
+    -- these keys should mimic external wallet keys needed to sign the commit tx
+    (externalVk, externalSk) <- keysFor External
+    -- Start hydra-node on chain tip
+    tip <- queryTip networkId nodeSocket
+    let contestationPeriod = UnsafeContestationPeriod 100
+    aliceChainConfig <-
+      chainConfigFor Alice workDir nodeSocket [] contestationPeriod
+        <&> \config -> config{networkId, startChainFrom = Just tip}
+    let hydraNodeId = 1
+
+    withHydraNode tracer aliceChainConfig workDir hydraNodeId aliceSk [] [1] hydraScriptsTxId $ \n1 -> do
+      -- Initialize & open head
+      send n1 $ input "Init" []
+      headId <- waitMatch 600 n1 $ headIsInitializingWith (Set.fromList [alice])
+
+      -- submit the tx using our external user key to get a utxo to commit
+      utxoToCommit <- seedFromFaucet node externalVk 2_000_000 Normal (contramap FromFaucet tracer)
+
+      -- Request to build a draft commit tx from hydra-node
+      let clientPayload = DraftCommitTx @Tx utxoToCommit
+
+      response <-
+        runReq defaultHttpConfig $
+          req
+            POST
+            (http "127.0.0.1" /: "commit")
+            (ReqBodyJson clientPayload)
+            (Proxy :: Proxy (JsonResponse (RestServerOutput Tx)))
+            (port $ 4000 + hydraNodeId)
+
+      responseStatusCode response `shouldBe` 200
+
+      let DraftedCommitTx commitTx = responseBody response
+
+      -- sign and submit the tx with our external user key
+      let signedCommitTx = signWith externalSk commitTx
+      submitTransaction networkId nodeSocket signedCommitTx
+
+      waitFor tracer 600 [n1] $
+        output "HeadIsOpen" ["utxo" .= utxoToCommit, "headId" .= headId]
+
+      traceRemainingFunds node tracer Alice
+ where
+  RunningNode{nodeSocket} = node
+
+traceRemainingFunds :: RunningNode -> Tracer IO EndToEndLog -> Actor -> IO ()
+traceRemainingFunds node tracer actor = do
+  (actorVk, _) <- keysFor actor
+  (fuelUTxO, otherUTxO) <- queryMarkedUTxO node actorVk
+  traceWith tracer RemainingFunds{actor = actorName actor, fuelUTxO, otherUTxO}
 
 -- | Initialize open and close a head on a real network and ensure contestation
 -- period longer than the time horizon is possible. For this it is enough that
@@ -233,14 +284,9 @@ canCloseWithLongContestationPeriod tracer workDir node@RunningNode{networkId} hy
     void $
       waitMatch 60 n1 $ \v -> do
         guard $ v ^? key "tag" == Just "HeadIsClosed"
-  traceRemainingFunds Alice
+  traceRemainingFunds node tracer Alice
  where
   RunningNode{nodeSocket} = node
-
-  traceRemainingFunds actor = do
-    (actorVk, _) <- keysFor actor
-    (fuelUTxO, otherUTxO) <- queryMarkedUTxO node actorVk
-    traceWith tracer RemainingFunds{actor = actorName actor, fuelUTxO, otherUTxO}
 
 -- | Refuel given 'Actor' with given 'Lovelace' if current marked UTxO is below that amount.
 refuelIfNeeded ::
