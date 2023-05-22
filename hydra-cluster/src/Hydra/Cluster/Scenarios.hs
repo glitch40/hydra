@@ -12,6 +12,7 @@ import Data.Aeson (object, (.=))
 import qualified Data.Aeson as Aeson
 import Data.Aeson.Lens (key, _JSON)
 import Data.Aeson.Types (parseMaybe)
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Short as SBS
 import qualified Data.Set as Set
 import Hydra.API.ClientInput (RestClientInput (..))
@@ -223,19 +224,20 @@ singlePartyCommitsScriptUtxoFromExternal tracer workDir node@RunningNode{network
 
       -- here we should produce a valid script
       dummyScript <- generate $ SBS.toShort <$> arbitrary
-      let scriptAddress = mkScriptAddress @PlutusScriptV2 networkId (fromPlutusScript dummyScript)
+      let script = fromPlutusScript dummyScript
+          scriptAddress = mkScriptAddress @PlutusScriptV2 networkId script
       _ <- publishScript node scriptAddress externalSk
 
       let scriptAddressForQuery =
-            buildScriptAddress
-              (PlutusScript $ PlutusScriptSerialised dummyScript)
-              networkId
+            buildScriptAddress (PlutusScript $ PlutusScriptSerialised dummyScript) networkId
 
       -- grab a script utxo to commit
       scriptUtxo <- queryUTxO networkId nodeSocket QueryTip [scriptAddressForQuery]
 
       -- Request to build a draft commit tx from hydra-node
-      let clientPayload = DraftCommitTx @Tx scriptUtxo
+      let reedemer = ScriptDataBytes BS.empty
+          datum = ScriptDataBytes BS.empty
+          clientPayload = DraftScriptCommitTx @Tx scriptUtxo reedemer datum script
 
       response <-
         runReq defaultHttpConfig $

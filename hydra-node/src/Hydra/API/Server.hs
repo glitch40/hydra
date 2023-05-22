@@ -32,6 +32,7 @@ import Hydra.API.ServerOutput (
   projectSnapshotUtxo,
   snapshotUtxo,
  )
+import Hydra.Cardano.Api (PlutusScript, ScriptData)
 import Hydra.Chain (Chain (..), IsChainState)
 import Hydra.Ledger (UTxOType)
 import Hydra.Logging (Tracer, traceWith)
