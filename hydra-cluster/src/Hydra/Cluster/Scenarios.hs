@@ -1,22 +1,52 @@
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TypeApplications #-}
 
 module Hydra.Cluster.Scenarios where
 
 import Hydra.Prelude
 
-import CardanoClient (queryTip, submitTransaction)
+import qualified Cardano.Api.UTxO as UTxO
+import CardanoClient (
+  QueryPoint (QueryTip),
+  awaitTransaction,
+  buildTransaction,
+  queryProtocolParameters,
+  queryTip,
+  queryUTxOFor,
+  submitTransaction,
+ )
 import CardanoNode (RunningNode (..))
 import Control.Lens ((^?))
 import Data.Aeson (Value, object, (.=))
 import Data.Aeson.Lens (key, _JSON)
 import Data.Aeson.Types (parseMaybe)
+import qualified Data.ByteString.Short as SBS
 import qualified Data.Set as Set
 import Hydra.API.RestServer (DraftCommitTxRequest (..), DraftCommitTxResponse (..))
 import Hydra.Cardano.Api (
+  AddressInEra,
   Lovelace,
+  PaymentKey,
+  PlutusScriptV2,
+  ScriptData (..),
+  ShelleyWitnessSigningKey (WitnessPaymentKey),
+  SigningKey,
   TxId,
+  UTxO,
+  fromPlutusScript,
+  getVerificationKey,
+  makeShelleyKeyWitness,
+  makeSignedTransaction,
+  mkScriptAddress,
+  mkTxOutAutoBalance,
+  mkVkAddress,
   selectLovelace,
+  throwErrorAsException,
+  txOutAddress,
+  txOutValue,
+  pattern ReferenceScriptNone,
+  pattern TxOutDatumNone,
  )
 import Hydra.Chain (HeadId)
 import Hydra.Chain.Direct.Wallet (signWith)
@@ -143,6 +173,8 @@ singlePartyHeadFullLifeCycle tracer workDir node@RunningNode{networkId} hydraScr
     (fuelUTxO, otherUTxO) <- queryMarkedUTxO node actorVk
     traceWith tracer RemainingFunds{actor = actorName actor, fuelUTxO, otherUTxO}
 
+-- | Single hydra-node where the commit is done from an external UTxO owned by a
+-- verification key.
 singlePartyCommitsFromExternal ::
   Tracer IO EndToEndLog ->
   FilePath ->
@@ -152,20 +184,16 @@ singlePartyCommitsFromExternal ::
 singlePartyCommitsFromExternal tracer workDir node@RunningNode{networkId} hydraScriptsTxId =
   (`finally` returnFundsToFaucet tracer node Alice) $ do
     refuelIfNeeded tracer node Alice 25_000_000
-
-    -- these keys should mimic external wallet keys needed to sign the commit tx
-    (externalVk, externalSk) <- generate genKeyPair
-    -- submit the tx using our external user key to get a utxo to commit
-    utxoToCommit <- seedFromFaucet node externalVk 2_000_000 Normal (contramap FromFaucet tracer)
-
-    let contestationPeriod = UnsafeContestationPeriod 100
-    aliceChainConfig <- chainConfigFor Alice workDir nodeSocket [] contestationPeriod
+    aliceChainConfig <- chainConfigFor Alice workDir nodeSocket [] $ UnsafeContestationPeriod 100
     let hydraNodeId = 1
-
     withHydraNode tracer aliceChainConfig workDir hydraNodeId aliceSk [] [1] hydraScriptsTxId $ \n1 -> do
-      -- Initialize & open head
       send n1 $ input "Init" []
       headId <- waitMatch 600 n1 $ headIsInitializingWith (Set.fromList [alice])
+
+      -- these keys should mimic external wallet keys needed to sign the commit tx
+      (externalVk, externalSk) <- generate genKeyPair
+      -- submit the tx using our external user key to get a utxo to commit
+      utxoToCommit <- seedFromFaucet node externalVk 2_000_000 Normal (contramap FromFaucet tracer)
 
       -- Request to build a draft commit tx from hydra-node
       let clientPayload = DraftCommitTxRequest @Tx utxoToCommit
@@ -191,6 +219,102 @@ singlePartyCommitsFromExternal tracer workDir node@RunningNode{networkId} hydraS
         output "HeadIsOpen" ["utxo" .= utxoToCommit, "headId" .= headId]
  where
   RunningNode{nodeSocket} = node
+
+-- | Single hydra-node where the commit is done from an external UTxO owned by a
+-- script which requires providing script, datum and redeemer instead of
+-- signing the transaction.
+singlePartyCommitsFromExternalScript ::
+  Tracer IO EndToEndLog ->
+  FilePath ->
+  RunningNode ->
+  TxId ->
+  IO ()
+singlePartyCommitsFromExternalScript tracer workDir node@RunningNode{networkId} hydraScriptsTxId =
+  (`finally` returnFundsToFaucet tracer node Alice) $ do
+    refuelIfNeeded tracer node Alice 25_000_000
+    aliceChainConfig <- chainConfigFor Alice workDir nodeSocket [] $ UnsafeContestationPeriod 100
+    let hydraNodeId = 1
+    withHydraNode tracer aliceChainConfig workDir hydraNodeId aliceSk [] [1] hydraScriptsTxId $ \n1 -> do
+      send n1 $ input "Init" []
+      headId <- waitMatch 600 n1 $ headIsInitializingWith (Set.fromList [alice])
+
+      -- FIXME: use a script that is valid
+      dummyScript <- generate $ SBS.toShort <$> arbitrary
+      let script = fromPlutusScript dummyScript
+          scriptAddress = mkScriptAddress @PlutusScriptV2 networkId script
+      (someVk, someSk) <- generate genKeyPair
+      normalUTxO <- seedFromFaucet node someVk 10_000_000 Normal (contramap FromFaucet tracer)
+      print normalUTxO
+      scriptUtxo <- createScriptOutput node scriptAddress someSk
+      print scriptUtxo
+
+      -- Request to build a draft commit tx from hydra-node
+      let reedemer = ScriptDataBytes mempty
+          datum = ScriptDataBytes mempty
+          clientPayload = DraftCommitTxRequest @Tx scriptUtxo -- reedemer datum script
+      response <-
+        runReq defaultHttpConfig $
+          req
+            POST
+            (http "127.0.0.1" /: "commit")
+            (ReqBodyJson clientPayload)
+            (Proxy :: Proxy (JsonResponse (DraftCommitTxResponse Tx)))
+            (port $ 4000 + hydraNodeId)
+
+      responseStatusCode response `shouldBe` 200
+
+      let DraftCommitTxResponse commitTx = responseBody response
+
+      -- sign and submit the tx with our external user key
+      let signedCommitTx = signWith someSk commitTx
+      submitTransaction networkId nodeSocket signedCommitTx
+
+      waitFor tracer 600 [n1] $
+        output "HeadIsOpen" ["utxo" .= scriptUtxo, "headId" .= headId]
+ where
+  RunningNode{nodeSocket} = node
+
+  -- TODO: refactor into simpler
+  createScriptOutput ::
+    RunningNode ->
+    AddressInEra ->
+    SigningKey PaymentKey ->
+    IO UTxO
+  createScriptOutput RunningNode{networkId, nodeSocket} scriptAddress sk = do
+    pparams <- queryProtocolParameters networkId nodeSocket QueryTip
+    utxo <- queryUTxOFor networkId nodeSocket QueryTip vk
+    let outputs = [mkScriptTxOut pparams]
+        totalDeposit = sum (selectLovelace . txOutValue <$> outputs)
+        someUTxO =
+          maybe mempty UTxO.singleton $
+            UTxO.find (\o -> selectLovelace (txOutValue o) > totalDeposit) utxo
+    buildTransaction
+      networkId
+      nodeSocket
+      changeAddress
+      someUTxO
+      []
+      outputs
+      >>= \case
+        Left e ->
+          throwErrorAsException e
+        Right body -> do
+          let tx = makeSignedTransaction [makeShelleyKeyWitness body (WitnessPaymentKey sk)] body
+          submitTransaction networkId nodeSocket tx
+          newUtxo <- awaitTransaction networkId nodeSocket tx
+          pure $ UTxO.filter (\out -> txOutAddress out == scriptAddress) newUtxo
+   where
+    vk = getVerificationKey sk
+
+    changeAddress = mkVkAddress networkId vk
+
+    mkScriptTxOut pparams =
+      mkTxOutAutoBalance
+        pparams
+        scriptAddress
+        mempty
+        TxOutDatumNone
+        ReferenceScriptNone
 
 -- | Initialize open and close a head on a real network and ensure contestation
 -- period longer than the time horizon is possible. For this it is enough that
