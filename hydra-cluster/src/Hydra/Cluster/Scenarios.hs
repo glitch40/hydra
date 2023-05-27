@@ -23,10 +23,11 @@ import Control.Lens ((^?))
 import Data.Aeson (Value, object, (.=))
 import Data.Aeson.Lens (key, _JSON)
 import Data.Aeson.Types (parseMaybe)
-import qualified Data.ByteString.Short as SBS
+import qualified Data.List as List
 import qualified Data.Set as Set
 import Hydra.API.RestServer (DraftCommitTxRequest (..), DraftCommitTxResponse (..))
 import Hydra.Cardano.Api (
+  mkTxOutDatumHash,
   AddressInEra,
   BuildTxWith (BuildTxWith),
   Key (SigningKey, getVerificationKey),
@@ -51,16 +52,17 @@ import Hydra.Cardano.Api (
   mkTxOutAutoBalance,
   mkVkAddress,
   selectLovelace,
+  setTxInsCollateral,
+  setTxProtocolParams,
   signShelleyTransaction,
   throwErrorAsException,
   toLedgerEpochInfo,
   toScriptData,
   txOutAddress,
   txOutValue,
-  pattern PlutusScriptWitness,
   pattern ReferenceScriptNone,
   pattern ScriptWitness,
-  pattern TxOutDatumNone,
+  pattern TxInsCollateral, createAndValidateTransactionBody, ProtocolParameters,
  )
 import Hydra.Chain (HeadId)
 import Hydra.Chain.Direct.Wallet (signWith)
@@ -70,7 +72,7 @@ import Hydra.Cluster.Fixture (Actor (..), actorName, alice, aliceSk, aliceVk, bo
 import Hydra.Cluster.Util (chainConfigFor, keysFor)
 import Hydra.ContestationPeriod (ContestationPeriod (UnsafeContestationPeriod))
 import Hydra.Ledger (IsTx (balance))
-import Hydra.Ledger.Cardano (Tx, genKeyPair)
+import Hydra.Ledger.Cardano (genKeyPair)
 import Hydra.Logging (Tracer, traceWith)
 import Hydra.Options (ChainConfig, networkId, startChainFrom)
 import Hydra.Party (Party)
@@ -90,6 +92,7 @@ import Network.HTTP.Req (
  )
 import Test.Hspec.Expectations (shouldBe)
 import Test.QuickCheck (generate)
+import qualified PlutusLedgerApi.Test.Examples as Plutus
 
 restartedNodeCanObserveCommitTx :: Tracer IO EndToEndLog -> FilePath -> RunningNode -> TxId -> IO ()
 restartedNodeCanObserveCommitTx tracer workDir cardanoNode hydraScriptsTxId = do
@@ -255,7 +258,7 @@ singlePartyCommitsFromExternalScript ::
   RunningNode ->
   TxId ->
   IO ()
-singlePartyCommitsFromExternalScript tracer workDir node@RunningNode{networkId} hydraScriptsTxId =
+singlePartyCommitsFromExternalScript tracer workDir node hydraScriptsTxId =
   (`finally` returnFundsToFaucet tracer node Alice) $ do
     refuelIfNeeded tracer node Alice 25_000_000
     aliceChainConfig <- chainConfigFor Alice workDir nodeSocket [] $ UnsafeContestationPeriod 100
@@ -264,35 +267,37 @@ singlePartyCommitsFromExternalScript tracer workDir node@RunningNode{networkId} 
       send n1 $ input "Init" []
       headId <- waitMatch 600 n1 $ headIsInitializingWith (Set.fromList [alice])
 
-      -- FIXME: use a script that is valid
-      dummyScript <- generate $ SBS.toShort <$> arbitrary
-      let script = fromPlutusScript dummyScript
+      let script = fromPlutusScript @PlutusScriptV2 $ Plutus.alwaysSucceedingNAryFunction 2
           scriptAddress = mkScriptAddress @PlutusScriptV2 networkId script
       (someVk, someSk) <- generate genKeyPair
+      pparams <- queryProtocolParameters networkId nodeSocket QueryTip
       normalUTxO <- seedFromFaucet node someVk 10_000_000 Normal (contramap FromFaucet tracer)
-      print normalUTxO
-      scriptUtxo <- createScriptOutput node scriptAddress someSk
-      print scriptUtxo
+      scriptUtxo <- createScriptOutput pparams scriptAddress someSk
 
       let redeemer = toScriptData ()
-          datum = toScriptData ()
+          datum = ScriptDatumForTxIn $ toScriptData ()
 
-      let [(scriptTxIn, scriptTxOut)] = UTxO.pairs scriptUtxo
-
+      let scriptTxIn = List.head $ fst <$> UTxO.pairs scriptUtxo
+          scriptWitness =
+              BuildTxWith $
+                ScriptWitness ScriptWitnessForSpending $
+                  mkScriptWitness script datum redeemer
+      
       -- TODO: temporary sanity check: Spend the script on L1
       let body =
             defaultTxBodyContent
-              & addTxIn
-                ( scriptTxIn
-                , BuildTxWith $
-                    ScriptWitness ScriptWitnessForSpending $
-                      mkScriptWitness script (ScriptDatumForTxIn datum) redeemer
-                )
+              & addTxIn (scriptTxIn, scriptWitness)
+              & setTxInsCollateral (TxInsCollateral mempty)
+              & setTxProtocolParams (BuildTxWith $ Just pparams)
 
       systemStart <- querySystemStart networkId nodeSocket QueryTip
       epochInfo <- toLedgerEpochInfo <$> queryEraHistory networkId nodeSocket QueryTip
       let changeAddress = mkVkAddress networkId someVk
-      pparams <- queryProtocolParameters networkId nodeSocket QueryTip
+
+      -- DEBUG
+      let validatedTx = createAndValidateTransactionBody body
+      print validatedTx
+
       let balancedBody =
             makeTransactionBodyAutoBalance
               systemStart
@@ -333,18 +338,17 @@ singlePartyCommitsFromExternalScript tracer workDir node@RunningNode{networkId} 
       waitFor tracer 600 [n1] $
         output "HeadIsOpen" ["utxo" .= scriptUtxo, "headId" .= headId]
  where
-  RunningNode{nodeSocket} = node
+  RunningNode{networkId, nodeSocket} = node
 
   -- TODO: refactor into simpler
   createScriptOutput ::
-    RunningNode ->
+    ProtocolParameters ->
     AddressInEra ->
     SigningKey PaymentKey ->
     IO UTxO
-  createScriptOutput RunningNode{networkId, nodeSocket} scriptAddress sk = do
-    pparams <- queryProtocolParameters networkId nodeSocket QueryTip
+  createScriptOutput pparams scriptAddress sk = do
     utxo <- queryUTxOFor networkId nodeSocket QueryTip vk
-    let outputs = [mkScriptTxOut pparams]
+    let outputs = [scriptTxOut]
         totalDeposit = sum (selectLovelace . txOutValue <$> outputs)
         someUTxO =
           maybe mempty UTxO.singleton $
@@ -369,12 +373,12 @@ singlePartyCommitsFromExternalScript tracer workDir node@RunningNode{networkId} 
 
     changeAddress = mkVkAddress networkId vk
 
-    mkScriptTxOut pparams =
+    scriptTxOut =
       mkTxOutAutoBalance
         pparams
         scriptAddress
         mempty
-        TxOutDatumNone
+        (mkTxOutDatumHash ())
         ReferenceScriptNone
 
 -- | Initialize open and close a head on a real network and ensure contestation
