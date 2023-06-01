@@ -16,7 +16,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Hydra.API.ClientInput (ClientInput)
 import Hydra.API.Projection (Projection (..), mkProjection)
-import Hydra.API.RestServer (DraftCommitTxRequest (..), DraftCommitTxResponse (..))
+import Hydra.API.RestServer (DraftCommitTxRequest (..), DraftCommitTxResponse (..), ScriptInfo (..))
 import Hydra.API.ServerOutput (
   HeadStatus (Idle),
   OutputFormat (..),
@@ -30,6 +30,9 @@ import Hydra.API.ServerOutput (
   projectHeadStatus,
   projectSnapshotUtxo,
   snapshotUtxo,
+ )
+import Hydra.Cardano.Api (
+  ScriptDatum (ScriptDatumForTxIn),
  )
 import Hydra.Chain (Chain (..), IsChainState)
 import Hydra.Ledger (UTxOType)
@@ -270,17 +273,13 @@ runAPIServer host port party tracer history chain callback headStatusP snapshotU
     let k = [queryKey|tx-output|]
         v = [queryValue|cbor|]
         queryP = QueryParam k v
-     in case queryP `elem` qp of
-          True -> OutputCBOR
-          False -> OutputJSON
+     in if queryP `elem` qp then OutputCBOR else OutputJSON
 
   decideOnUTxODisplay qp =
     let k = [queryKey|snapshot-utxo|]
         v = [queryValue|no|]
         queryP = QueryParam k v
-     in case queryP `elem` qp of
-          True -> WithoutUTxO
-          False -> WithUTxO
+     in if queryP `elem` qp then WithoutUTxO else WithUTxO
 
   shouldNotServeHistory qp =
     flip any qp $ \case
@@ -357,12 +356,15 @@ handleDraftCommitUtxo directChain tracer body reqMethod reqPaths respond = do
           }
 
       let userUtxo = utxo requestInput
-      eCommitTx <- draftTx userUtxo
-
+      eCommitTx <- case scriptInfo requestInput of
+        Nothing -> do
+          draftTx userUtxo
+        Just (ScriptInfo redeemer datum script collateralTxIns) -> do
+          draftScriptTx userUtxo (ScriptDatumForTxIn datum) redeemer script collateralTxIns
       respond $
         case eCommitTx of
           Left err -> responseLBS status400 [] (show err)
           Right commitTx ->
             responseLBS status200 [] (Aeson.encode $ DraftCommitTxResponse commitTx)
  where
-  Chain{draftTx} = directChain
+  Chain{draftTx, draftScriptTx} = directChain

@@ -32,6 +32,7 @@ import Hydra.Chain (
   PostChainTx (CloseTx),
   PostTxError (NoSeedInput),
   confirmedSnapshot,
+  draftScriptTx,
   draftTx,
   postTx,
  )
@@ -391,7 +392,12 @@ testClient queue semaphore cnx = do
       testClient queue semaphore cnx
 
 dummyChainHandle :: Chain tx IO
-dummyChainHandle = Chain{postTx = \_ -> pure (), draftTx = \_ -> error "draftTx not implemented"}
+dummyChainHandle =
+  Chain
+    { postTx = \_ -> pure ()
+    , draftTx = \_ -> error "draftTx not implemented"
+    , draftScriptTx = \_ _ _ _ _ -> error "draftTx not implemented"
+    }
 
 noop :: Applicative m => a -> m ()
 noop = const $ pure ()

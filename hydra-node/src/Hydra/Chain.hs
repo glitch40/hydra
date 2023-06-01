@@ -22,8 +22,13 @@ import Hydra.Cardano.Api (
   ByronAddr,
   HasTypeProxy (..),
   Lovelace (..),
+  PlutusScript,
+  ScriptDatum,
+  ScriptRedeemer,
   SerialiseAsRawBytes (..),
+  TxIn,
   UsingRawBytesHex (..),
+  WitCtxTxIn,
  )
 import Hydra.ContestationPeriod (ContestationPeriod)
 import Hydra.Ledger (ChainSlot, IsTx, TxIdType, UTxOType)
@@ -186,6 +191,14 @@ data Chain tx m = Chain
   --
   -- Does at least throw 'PostTxError'.
   , draftTx :: (IsChainState tx, MonadThrow m) => UTxOType tx -> m (Either (PostTxError tx) tx)
+  , draftScriptTx ::
+      (IsChainState tx, MonadThrow m) =>
+      UTxOType tx ->
+      ScriptDatum WitCtxTxIn ->
+      ScriptRedeemer ->
+      PlutusScript ->
+      [TxIn] ->
+      m (Either (PostTxError tx) tx)
   }
 
 data ChainEvent tx

@@ -225,7 +225,7 @@ singlePartyCommitsFromExternal tracer workDir node@RunningNode{networkId} hydraS
       utxoToCommit <- seedFromFaucet node externalVk 2_000_000 Normal (contramap FromFaucet tracer)
 
       -- Request to build a draft commit tx from hydra-node
-      let clientPayload = DraftCommitTxRequest @Tx utxoToCommit
+      let clientPayload = DraftCommitTxRequest @Tx utxoToCommit Nothing
 
       response <-
         runReq defaultHttpConfig $
@@ -279,11 +279,11 @@ singlePartyCommitsFromExternalScript tracer workDir node hydraScriptsTxId =
           datum = ScriptDatumForTxIn $ toScriptData ()
 
       let scriptTxIn = List.head $ fst <$> UTxO.pairs scriptUtxo
-          collateralTxIns = fst <$> UTxO.pairs colateralUTxO
           scriptWitness =
               BuildTxWith $
                 ScriptWitness ScriptWitnessForSpending $
                   mkScriptWitness script datum redeemer
+          collateralTxIns = fst <$> UTxO.pairs colateralUTxO
 
       -- TODO: temporary sanity check: Spend the script on L1
       let body =
@@ -309,6 +309,7 @@ singlePartyCommitsFromExternalScript tracer workDir node hydraScriptsTxId =
               & \case
                 Left e -> error (show e)
                 Right res -> balancedTxBody res
+      
       let spendScriptTx = signShelleyTransaction balancedBody [WitnessPaymentKey someSk]
       submitTransaction networkId nodeSocket spendScriptTx
 
