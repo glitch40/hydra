@@ -280,9 +280,9 @@ singlePartyCommitsFromExternalScript tracer workDir node hydraScriptsTxId =
 
       let scriptTxIn = List.head $ fst <$> UTxO.pairs scriptUtxo
           scriptWitness =
-              BuildTxWith $
-                ScriptWitness ScriptWitnessForSpending $
-                  mkScriptWitness script datum redeemer
+            BuildTxWith $
+              ScriptWitness ScriptWitnessForSpending $
+                mkScriptWitness script datum redeemer
           collateralTxIns = fst <$> UTxO.pairs colateralUTxO
 
       -- TODO: temporary sanity check: Spend the script on L1
@@ -309,7 +309,7 @@ singlePartyCommitsFromExternalScript tracer workDir node hydraScriptsTxId =
               & \case
                 Left e -> error (show e)
                 Right res -> balancedTxBody res
-      
+
       let spendScriptTx = signShelleyTransaction balancedBody [WitnessPaymentKey someSk]
       submitTransaction networkId nodeSocket spendScriptTx
 
@@ -344,7 +344,7 @@ singlePartyCommitsFromExternalScript tracer workDir node hydraScriptsTxId =
     ProtocolParameters ->
     AddressInEra ->
     SigningKey PaymentKey ->
-    UTxO -> 
+    UTxO ->
     IO UTxO
   createScriptOutput pparams scriptAddress sk utxo = do
     let outputs = [scriptTxOut]
