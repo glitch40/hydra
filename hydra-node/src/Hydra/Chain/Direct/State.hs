@@ -18,6 +18,7 @@ import qualified Data.Map as Map
 import Data.Maybe (fromJust)
 import Hydra.Cardano.Api (
   AssetName (AssetName),
+  BuildTx,
   ChainPoint (..),
   CtxUTxO,
   Hash,
@@ -30,6 +31,7 @@ import Hydra.Cardano.Api (
   SerialiseAsRawBytes (serialiseToRawBytes),
   SlotNo (SlotNo),
   Tx,
+  TxBodyContent,
   TxIn,
   TxOut,
   UTxO,
@@ -96,6 +98,7 @@ import Hydra.Chain.Direct.Tx (
   observeContestTx,
   observeFanoutTx,
   observeInitTx,
+  rawCommitTxBody,
  )
 import Hydra.ContestationPeriod (ContestationPeriod)
 import Hydra.Crypto (HydraKey)
@@ -323,7 +326,9 @@ commitScript ::
   ChainContext ->
   InitialState ->
   UTxO ->
-  Either (PostTxError Tx) Tx
+  Either
+    (PostTxError Tx)
+    (TxBodyContent BuildTx)
 commitScript ctx st utxo = do
   case ownInitial ctx st of
     Nothing ->
@@ -332,8 +337,7 @@ commitScript ctx st utxo = do
       rejectByronAddress utxo
       rejectReferenceScripts utxo
       rejectMoreThanMainnetLimit networkId utxo
-      -- FIXME: should build a script tx using rawCommitTxBody and taking more args
-      Right $ commitTx networkId scriptRegistry headId ownParty utxo initial
+      Right $ rawCommitTxBody networkId scriptRegistry headId ownParty utxo initial
  where
   ChainContext{networkId, ownParty, scriptRegistry} = ctx
   InitialState{headId} = st
