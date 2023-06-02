@@ -1,4 +1,3 @@
-{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 module Hydra.API.ClientInput where
@@ -38,4 +37,3 @@ instance (Arbitrary tx, Arbitrary (UTxOType tx)) => Arbitrary (ClientInput tx) w
     Close -> []
     Contest -> []
     Fanout -> []
-
