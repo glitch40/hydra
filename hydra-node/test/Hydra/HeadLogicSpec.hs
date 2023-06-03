@@ -90,7 +90,8 @@ spec = do
             inputs = utxoRef 1
             s0 = inOpenState threeParties ledger
 
-        update bobEnv ledger s0 reqTx `shouldBe` Wait (WaitOnNotApplicableTx (ValidationError "cannot apply transaction"))
+        update bobEnv ledger s0 reqTx
+          `shouldBe` Wait (WaitOnNotApplicableTx (ValidationError "cannot apply transaction"))
 
       it "confirms snapshot given it receives AckSn from all parties" $ do
         let s0 = inOpenState threeParties ledger
@@ -144,10 +145,16 @@ spec = do
         update bobEnv ledger s3 (ackFrom aliceSk alice)
           `shouldBe` Error (RequireFailed "requireVerifiedMultisignature")
 
-      it "waits if we receive a snapshot with not-yet-seen transactions" $ do
+      it "waits if we receive a snapshot with not-yet-applicable transactions" $ do
         let event = NetworkEvent defaultTTL $ ReqSn alice 1 [SimpleTx 1 (utxoRef 1) (utxoRef 2)]
         update bobEnv ledger (inOpenState threeParties ledger) event
           `shouldBe` Wait (WaitOnNotApplicableTx (ValidationError "cannot apply transaction"))
+
+      it "waits if we receive a snapshot with not-yet-seen (but applicable) transactions" $ do
+        let s0 = inOpenState threeParties ledger
+            reqSn = NetworkEvent defaultTTL $ ReqSn alice 1 [SimpleTx 1 mempty (utxoRef 1)]
+        update bobEnv ledger s0 reqSn
+          `shouldBe` Wait (WaitOnSeenTx 1)
 
       it "waits if we receive an AckSn for an unseen snapshot" $ do
         let snapshot = Snapshot 1 mempty []
