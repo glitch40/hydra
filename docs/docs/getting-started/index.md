@@ -39,7 +39,7 @@ see also sections 7, 8 and 9 of the [Apache 2.0 License][license].
 
 :::
 
-[known-issues]: ../known-issues
+[known-issues]: ../docs/known-issues
 [license]: https://github.com/input-output-hk/hydra/blob/master/LICENSE
 
 ```mdx-code-block
